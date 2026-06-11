@@ -395,7 +395,7 @@ def ai_generate_steps(frame_paths, api_key, hint=""):
     })
 
     with client.messages.stream(
-        model="claude-opus-4-8",
+        model="claude-sonnet-4-6",
         max_tokens=16000,
         thinking={"type": "adaptive"},
         output_config={"format": {"type": "json_schema", "schema": AI_SCHEMA}},
@@ -422,7 +422,7 @@ uploaded_files = st.file_uploader(
     "動画ファイル（複数可）", type=["mov", "mp4", "avi", "mkv"],
     accept_multiple_files=True,
 )
-interval_sec = st.slider("⏱ フレーム抽出間隔（秒）", 1, 10, 3)
+interval_sec = st.slider("⏱ フレーム抽出間隔（秒）", 1, 10, 5)
 
 if st.button("🎞 フレームを抽出する", disabled=not uploaded_files):
     if st.session_state.tmp_dir is None:
