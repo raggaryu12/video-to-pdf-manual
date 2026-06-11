@@ -125,33 +125,27 @@ C_BORDER = colors.HexColor("#EEEEEE")
 # ── フォント登録 ────────────────────────────────────────
 @st.cache_resource
 def register_font():
+    # 同梱フォント最優先（Windows / Streamlit Cloud どちらでも同じ見た目になる）
+    # 注意: Debian の fonts-noto-cjk は CFF形式(.ttc)で ReportLab が読めないため使わない
     candidates = [
-        ("C:/Windows/Fonts/meiryo.ttc", 0),     # Meiryo 通常
-        ("C:/Windows/Fonts/meiryob.ttc", 0),    # Meiryo 太字
+        (os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansJP-Regular.ttf"), None),
+        ("C:/Windows/Fonts/meiryo.ttc", 0),
         ("C:/Windows/Fonts/msgothic.ttc", 0),
-        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
-        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 0),
-        (os.path.join(os.path.dirname(__file__), "fonts", "NotoSansCJKjp-Regular.otf"), None),
     ]
-    regular = bold = None
+    regular = None
     for path, idx in candidates:
         if not os.path.exists(path):
             continue
         try:
             kwargs = {"subfontIndex": idx} if idx is not None and path.endswith(".ttc") else {}
-            if regular is None:
-                pdfmetrics.registerFont(TTFont("JFont", path, **kwargs))
-                regular = "JFont"
-            if bold is None and ("Bold" in path or path.endswith("b.ttc")):
-                pdfmetrics.registerFont(TTFont("JFontB", path, **kwargs))
-                bold = "JFontB"
+            pdfmetrics.registerFont(TTFont("JFont", path, **kwargs))
+            regular = "JFont"
+            break
         except Exception:
             continue
     if regular is None:
         regular = "Helvetica"
-    if bold is None:
-        bold = regular
-    return regular, bold
+    return regular, regular
 
 FONT, FONT_B = register_font()
 
