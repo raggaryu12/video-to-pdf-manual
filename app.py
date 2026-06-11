@@ -1,6 +1,8 @@
 import streamlit as st
 import cv2
 import os
+import json
+import base64
 import tempfile
 from datetime import date
 from reportlab.lib.pagesizes import A4
@@ -17,9 +19,98 @@ from reportlab.pdfbase.ttfonts import TTFont
 # ── ページ設定 ──────────────────────────────────────────
 st.set_page_config(
     page_title="動画→PDF 操作手順書メーカー",
-    page_icon="🎬",
+    page_icon="🍳",
     layout="wide",
 )
+
+# ── クックパッド風デザイン CSS ───────────────────────────
+st.markdown("""
+<style>
+/* 全体: noto-sans + 詰め組み + 温かみのあるオフホワイト背景 */
+html, body, [class*="st-"], .stApp {
+    font-family: "Noto Sans JP", noto-sans, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, arial, sans-serif !important;
+    letter-spacing: -0.4px;
+    font-feature-settings: "liga";
+    color: #0f0f0f;
+}
+.stApp { background-color: #f8f6f2; }
+
+/* 見出し: weight 600 で統一（700は使わない） */
+h1, h2, h3, h4 { font-weight: 600 !important; color: #0f0f0f; }
+h1 { font-size: 26px !important; }
+h2 { font-size: 18px !important; line-height: 28px; }
+h3 { font-size: 16px !important; line-height: 24px; }
+
+/* プライマリボタン: クックパッドオレンジ */
+.stButton > button[kind="primary"], .stDownloadButton > button {
+    background-color: #f28c06 !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    padding: 8px 24px !important;
+    font-weight: 600 !important;
+    font-size: 14px !important;
+}
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button:hover {
+    background-color: #d97a00 !important;
+}
+
+/* セカンダリボタン */
+.stButton > button[kind="secondary"] {
+    background: #fff !important;
+    color: #0f0f0f !important;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 8px !important;
+    padding: 8px 24px !important;
+    font-weight: 600 !important;
+}
+
+/* 入力欄 */
+.stTextInput input, .stTextArea textarea {
+    background: #fff !important;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 8px !important;
+    font-size: 16px !important;
+    color: #0f0f0f !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+    border-color: #f28c06 !important;
+    box-shadow: 0 0 0 1px #f28c06 !important;
+}
+
+/* カード風: expander とアップローダー */
+[data-testid="stExpander"] {
+    background: #fff;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+[data-testid="stFileUploaderDropzone"] {
+    background: #fff !important;
+    border: 1px solid #e0e0e0 !important;
+    border-radius: 12px !important;
+}
+
+/* フレームカード（列内の画像+入力をカード化） */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px;
+}
+[data-testid="stImage"] img { border-radius: 8px; }
+
+/* キャプション */
+.stCaption, [data-testid="stCaptionContainer"] { color: #757575 !important; font-size: 12px !important; }
+
+/* スライダー・ラジオのアクセント */
+.stSlider [data-baseweb="slider"] [role="slider"] { background-color: #f28c06 !important; }
+
+/* マテリアルアイコンのフォントを復元（文字化け防止） */
+[data-testid="stIconMaterial"], .material-symbols-rounded, .material-symbols-outlined,
+span[class*="material-symbols"] {
+    font-family: "Material Symbols Rounded", "Material Symbols Outlined" !important;
+    letter-spacing: normal !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ── カラーテーマ（サンプルマニュアル準拠）─────────────────
 C_ORANGE = colors.HexColor("#F0900A")
@@ -240,6 +331,81 @@ def create_pdf(steps, output_path, title, subtitle="", phase_name=""):
 
     doc.build(story)
 
+# ── AI 自動生成（Claude API）────────────────────────────
+AI_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "manual_title": {"type": "string", "description": "マニュアル全体のタイトル"},
+        "manual_subtitle": {"type": "string", "description": "マニュアルの概要説明（1〜2文）"},
+        "phase_name": {"type": "string", "description": "フェーズ見出し（例：PHASE 1 ○○する）"},
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "frame_index": {"type": "integer", "description": "使用するフレームの番号（0始まり）"},
+                    "title": {"type": "string", "description": "ステップタイトル（〜する で終わる）"},
+                    "description": {"type": "string", "description": "操作の説明文（2〜3文、です・ます調）"},
+                    "tip": {"type": "string", "description": "補足ポイント。不要なら空文字"},
+                },
+                "required": ["frame_index", "title", "description", "tip"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["manual_title", "manual_subtitle", "phase_name", "steps"],
+    "additionalProperties": False,
+}
+
+
+def ai_generate_steps(frame_paths, api_key, hint=""):
+    """フレーム画像をClaudeに送り、キーシーン選別＋説明文生成"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content = []
+    for i, fp in enumerate(frame_paths):
+        # 長辺720pxに縮小してトークン節約
+        img = cv2.imread(fp)
+        h, w = img.shape[:2]
+        scale = 720 / max(h, w)
+        if scale < 1:
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        b64 = base64.standard_b64encode(buf.tobytes()).decode()
+        content.append({"type": "text", "text": f"フレーム {i}:"})
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+
+    hint_text = f"\n補足情報: {hint}" if hint else ""
+    content.append({
+        "type": "text",
+        "text": (
+            "これらは操作手順を撮影した動画から抽出したフレームです（時系列順・番号は0始まり）。"
+            "操作マニュアルを作るために以下を行ってください:\n"
+            "1. 手順として重要なキーフレームだけを選ぶ（ほぼ同じ画面の連続フレームは1枚に絞る）\n"
+            "2. 各キーフレームにステップタイトル・説明文・補足ポイントを書く\n"
+            "3. マニュアル全体のタイトル・概要・フェーズ見出しを提案する\n"
+            "説明文は患者さんやスタッフが読んでも分かる、ていねいな日本語（です・ます調）で。"
+            + hint_text
+        ),
+    })
+
+    with client.messages.stream(
+        model="claude-opus-4-8",
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        output_config={"format": {"type": "json_schema", "schema": AI_SCHEMA}},
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        message = stream.get_final_message()
+    text = next(b.text for b in message.content if b.type == "text")
+    return json.loads(text)
+
+
 # ════════════════════════════════════════════════════════
 #  UI
 # ════════════════════════════════════════════════════════
@@ -279,6 +445,37 @@ if st.session_state.frames:
     st.header("STEP 2️⃣ シーンを選んで説明を書く")
     st.caption("チェックを入れたフレームだけが PDF に載ります。タイトル・説明・ポイントを入力してください。")
 
+    # ── AI 自動生成 ──
+    with st.expander("🤖 AIで自動生成（キーシーン選別＋説明文作成）", expanded=True):
+        api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+        if not api_key:
+            api_key = st.text_input("Anthropic API キー", type="password",
+                                    help="console.anthropic.com で取得できます")
+        ai_hint = st.text_input("補足情報（任意）",
+                                placeholder="例：歯科医院でiPhoneの写真をNEOに取り込む手順です")
+        if st.button("✨ AIに自動生成してもらう", disabled=not api_key):
+            with st.spinner("AIがフレームを解析中...（1〜2分かかります）"):
+                try:
+                    result = ai_generate_steps(st.session_state.frames, api_key, ai_hint)
+                    # 全フレームをいったんオフに
+                    for i in range(len(st.session_state.frames)):
+                        st.session_state[f"use_{i}"] = False
+                    # AIが選んだフレームに結果を流し込む
+                    for step in result["steps"]:
+                        i = step["frame_index"]
+                        if 0 <= i < len(st.session_state.frames):
+                            st.session_state[f"use_{i}"] = True
+                            st.session_state[f"t_{i}"] = step["title"]
+                            st.session_state[f"d_{i}"] = step["description"]
+                            st.session_state[f"p_{i}"] = step["tip"]
+                    st.session_state["ai_title"] = result["manual_title"]
+                    st.session_state["ai_subtitle"] = result["manual_subtitle"]
+                    st.session_state["ai_phase"] = result["phase_name"]
+                    st.success(f"✅ AIが {len(result['steps'])} ステップを生成しました！下で確認・編集できます。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"AI生成エラー: {e}")
+
     steps = []
     cols_per_row = 3
     frames = st.session_state.frames
@@ -301,12 +498,16 @@ if st.session_state.frames:
 
     # ── STEP 3: マニュアル情報＆生成 ──
     st.header("STEP 3️⃣ マニュアル情報を入力して生成")
+    st.session_state.setdefault("ai_title", "操作マニュアル")
+    st.session_state.setdefault("ai_phase", "")
+    st.session_state.setdefault("ai_subtitle", "")
     c1, c2 = st.columns(2)
     with c1:
-        pdf_title = st.text_input("📕 マニュアルタイトル", value="操作マニュアル")
-        phase_name = st.text_input("🏷 フェーズ見出し（任意）", placeholder="例：PHASE 1　iPhoneをPCに接続する")
+        pdf_title = st.text_input("📕 マニュアルタイトル", key="ai_title")
+        phase_name = st.text_input("🏷 フェーズ見出し（任意）", key="ai_phase",
+                                   placeholder="例：PHASE 1　iPhoneをPCに接続する")
     with c2:
-        pdf_subtitle = st.text_area("📄 サブタイトル・概要（任意）", height=100,
+        pdf_subtitle = st.text_area("📄 サブタイトル・概要（任意）", key="ai_subtitle", height=100,
                                     placeholder="例：iPhoneで撮影した写真をNEOに取り込む手順をご説明します。")
 
     n_sel = len([s for s in steps if s["use"]])

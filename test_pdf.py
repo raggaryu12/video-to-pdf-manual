@@ -11,8 +11,10 @@ def _noop(*a, **k):
     return None
 for name in ["title", "caption", "header", "info", "success", "image",
              "text_input", "text_area", "checkbox", "slider", "button",
-             "file_uploader", "columns", "spinner", "download_button"]:
+             "file_uploader", "columns", "spinner", "download_button",
+             "markdown", "expander", "error", "rerun", "radio"]:
     setattr(st, name, _noop)
+st.secrets = {}
 class _State(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
