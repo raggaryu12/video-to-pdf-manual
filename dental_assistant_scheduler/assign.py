@@ -71,16 +71,30 @@ def slots_cover(assistant_slots, doctor_slots):
     return doctor_slots.issubset(assistant_slots)
 
 
-def weekday_jp(date_str):
+def to_date(date_str):
     from datetime import date
 
     y, m, d = (int(x) for x in date_str.split("-"))
-    return WEEKDAY_JP[date(y, m, d).weekday()]
+    return date(y, m, d)
+
+
+def weekday_jp(date_str):
+    return WEEKDAY_JP[to_date(date_str).weekday()]
+
+
+def week_start(date_str):
+    """その日が属する暦週(月曜始まり)の月曜日をYYYY-MM-DDで返す"""
+    from datetime import timedelta
+
+    d = to_date(date_str)
+    monday = d - timedelta(days=d.weekday())
+    return monday.isoformat()
 
 
 def pick_candidate(pool, doctor_id, doctor_slots, date, attendance, used_today,
                     weekly_count, preferred_map):
     """S1(継続)を最優先で試し、崩れる場合はS3充足優先・S2をタイブレークに新規選定する"""
+    week = week_start(date)
     pref = preferred_map.get(doctor_id)
     if pref and pref not in used_today:
         pref_slots = attendance.get((date, pref))
@@ -96,8 +110,8 @@ def pick_candidate(pool, doctor_id, doctor_slots, date, attendance, used_today,
         if not a_slots or not slots_cover(a_slots, doctor_slots):
             continue
         a_leaves_early = "C" not in a_slots
-        # タイブレーク優先順: 早退区分が一致(S2) → 週内の配置回数が少ない人を優先(S5への配慮)
-        candidates.append((a_leaves_early != doctor_leaves_early, weekly_count[aid], aid))
+        # タイブレーク優先順: 早退区分が一致(S2) → その暦週内の配置回数が少ない人を優先(S5への配慮)
+        candidates.append((a_leaves_early != doctor_leaves_early, weekly_count[(aid, week)], aid))
     if not candidates:
         return None, None
 
@@ -122,6 +136,7 @@ def run_assignment(staff, attendance):
     compromise_log = []
 
     for date in dates:
+        week = week_start(date)
         used_today = set()
         team_size_today = defaultdict(int)
         day_doctors = [d for d in doctor_ids if (date, d) in attendance]
@@ -135,7 +150,7 @@ def run_assignment(staff, attendance):
             )
             if lv3_pick:
                 used_today.add(lv3_pick)
-                weekly_count[lv3_pick] += 1
+                weekly_count[(lv3_pick, week)] += 1
                 team_size_today[doctor_id] += 1
                 assignments.append(dict(date=date, doctor_id=doctor_id, assistant_id=lv3_pick,
                                          level=3, note=lv3_note, filler="no"))
@@ -151,7 +166,7 @@ def run_assignment(staff, attendance):
             )
             if lv2_pick:
                 used_today.add(lv2_pick)
-                weekly_count[lv2_pick] += 1
+                weekly_count[(lv2_pick, week)] += 1
                 team_size_today[doctor_id] += 1
                 assignments.append(dict(date=date, doctor_id=doctor_id, assistant_id=lv2_pick,
                                          level=2, note=lv2_note, filler="no"))
@@ -161,10 +176,10 @@ def run_assignment(staff, attendance):
                     detail="条件を満たすLv2アシスタントがおらず、Lv3のみで対応しています",
                 ))
 
-        # Lv1はフィラー: 週4日未達の人を優先して空いているドクターに詰め込む(S5優先)
+        # Lv1はフィラー: その暦週で4日未達の人を優先して空いているドクターに詰め込む(S5優先)
         lv1_today = [a for a in lv1_ids if (date, a) in attendance and a not in used_today]
-        for aid in sorted(lv1_today, key=lambda a: weekly_count[a]):
-            if weekly_count[aid] >= WEEKLY_TARGET_DAYS:
+        for aid in sorted(lv1_today, key=lambda a: weekly_count[(a, week)]):
+            if weekly_count[(aid, week)] >= WEEKLY_TARGET_DAYS:
                 continue
             a_slots = attendance[(date, aid)]
             eligible = [d for d in day_doctors if slots_cover(a_slots, attendance[(date, d)])]
@@ -172,19 +187,23 @@ def run_assignment(staff, attendance):
                 continue
             target_doctor = min(eligible, key=lambda d: team_size_today[d])
             used_today.add(aid)
-            weekly_count[aid] += 1
+            weekly_count[(aid, week)] += 1
             team_size_today[target_doctor] += 1
             assignments.append(dict(date=date, doctor_id=target_doctor, assistant_id=aid,
                                      level=1, note="フィラー", filler="yes"))
 
-    # 週次サマリ: 出勤しているのに週4日の配置に届かなかった人を記録(S5未達ログ)
+    # 週次サマリ: 出勤しているのに週4日の配置に届かなかった人を暦週ごとに記録(S5未達ログ)
+    weeks = sorted({week_start(d) for d in dates})
     for aid in lv3_ids + lv2_ids + lv1_ids:
-        working_days = sum(1 for d in dates if (d, aid) in attendance)
-        if working_days >= WEEKLY_TARGET_DAYS and weekly_count[aid] < WEEKLY_TARGET_DAYS:
-            compromise_log.append(dict(
-                date="(週間)", doctor_id="-", issue="週4日未達",
-                detail=f"{aid} は出勤{working_days}日に対し、配置は{weekly_count[aid]}日でした",
-            ))
+        for week in weeks:
+            working_days = sum(
+                1 for d in dates if week_start(d) == week and (d, aid) in attendance
+            )
+            if working_days >= WEEKLY_TARGET_DAYS and weekly_count[(aid, week)] < WEEKLY_TARGET_DAYS:
+                compromise_log.append(dict(
+                    date=f"週{week}〜", doctor_id="-", issue="週4日未達",
+                    detail=f"{aid} はこの週に出勤{working_days}日に対し、配置は{weekly_count[(aid, week)]}日でした",
+                ))
 
     return dates, doctor_ids, assignments, compromise_log, weekly_count
 
@@ -208,7 +227,8 @@ def write_compromise_log(path, compromise_log):
             writer.writerow([row["date"], row["doctor_id"], row["issue"], row["detail"]])
 
 
-def write_html_report(path, dates, doctor_ids, assignments, compromise_log, weekly_count, staff):
+def write_html_report(path, dates, doctor_ids, assignments, compromise_log, weekly_count, staff,
+                       report_title="週間アシスタント配置表（ダミーデータ）"):
     by_date_doctor = defaultdict(list)
     for row in assignments:
         by_date_doctor[(row["date"], row["doctor_id"])].append(row)
@@ -236,13 +256,22 @@ def write_html_report(path, dates, doctor_ids, assignments, compromise_log, week
 
     header_cells = "".join(f"<th>{html.escape(d)}</th>" for d in doctor_ids)
 
+    weeks = sorted({w for (_aid, w) in weekly_count})
+    per_aid_total = defaultdict(int)
+    for (aid, w), count in weekly_count.items():
+        per_aid_total[aid] += count
+
     summary_rows = []
-    for aid in sorted(weekly_count):
+    for aid in sorted(per_aid_total):
         level = staff[aid]["level"]
+        week_cells = "".join(
+            f"<td>{weekly_count.get((aid, w), 0)}</td>" for w in weeks
+        )
         summary_rows.append(
             f"<tr><td>{html.escape(aid)}</td><td>{LEVEL_LABEL[level]}</td>"
-            f"<td>{weekly_count[aid]}</td></tr>"
+            f"{week_cells}<td><b>{per_aid_total[aid]}</b></td></tr>"
         )
+    week_header_cells = "".join(f"<th>週{html.escape(w)}〜</th>" for w in weeks)
 
     log_rows = "".join(
         f"<tr><td>{html.escape(str(r['date']))}</td><td>{html.escape(str(r['doctor_id']))}</td>"
@@ -269,16 +298,16 @@ def write_html_report(path, dates, doctor_ids, assignments, compromise_log, week
 </style>
 </head>
 <body>
-  <h1>週間アシスタント配置表（ダミーデータ）</h1>
+  <h1>{html.escape(report_title)}</h1>
   <p class="note">凡例: チップ内の下段は「レベル / 継続・変更・新規・フィラー(F)」を示します。</p>
   <table>
     <tr><th>日付</th>{header_cells}</tr>
     {''.join(table_rows)}
   </table>
 
-  <h2>週間の配置日数サマリ（目標: 週{WEEKLY_TARGET_DAYS}日以上）</h2>
+  <h2>暦週ごとの配置日数サマリ（目標: 週{WEEKLY_TARGET_DAYS}日以上）</h2>
   <table>
-    <tr><th>アシスタントID</th><th>レベル</th><th>配置日数</th></tr>
+    <tr><th>アシスタントID</th><th>レベル</th>{week_header_cells}<th>合計</th></tr>
     {''.join(summary_rows)}
   </table>
 
