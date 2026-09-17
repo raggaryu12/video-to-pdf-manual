@@ -13,3 +13,4 @@ Thumbs.db
 dental_assistant_scheduler/real_data/*_wide.csv
 dental_assistant_scheduler/real_data/roster.json
 dental_assistant_scheduler/real_data/output/name_mapping*.csv
+dental_assistant_scheduler/real_data/output/*実名版*
