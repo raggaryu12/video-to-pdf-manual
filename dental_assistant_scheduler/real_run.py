@@ -157,6 +157,49 @@ def load_wide_csv(path, roster_path=ROSTER_PATH):
     return staff, attendance, symbol_log, id_to_name, excluded
 
 
+def write_named_versions(out_dir, suffix, dates, doctor_ids, assignments, compromise_log,
+                          weekly_count, staff, id_to_name, report_title):
+    """実名版のCSV/HTMLを出力する(.gitignore対象。リポジトリにはコミットしない)"""
+
+    def nm(x):
+        return id_to_name.get(x, x)
+
+    doctor_ids_named = [nm(d) for d in doctor_ids]
+    staff_named = {nm(k): v for k, v in staff.items()}
+    assignments_named = [
+        {**a, "doctor_id": nm(a["doctor_id"]), "assistant_id": nm(a["assistant_id"])}
+        for a in assignments
+    ]
+    weekly_count_named = {(nm(aid), w): c for (aid, w), c in weekly_count.items()}
+
+    ids_sorted = sorted(id_to_name.keys(), key=len, reverse=True)
+    compromise_log_named = []
+    for row in compromise_log:
+        new_row = dict(row)
+        new_row["doctor_id"] = nm(row["doctor_id"])
+        detail = row["detail"]
+        for _id in ids_sorted:
+            if _id in detail:
+                detail = detail.replace(_id, id_to_name[_id])
+        new_row["detail"] = detail
+        compromise_log_named.append(new_row)
+
+    with open(f"{out_dir}/assignment_{suffix}_実名版.csv", "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "youbi", "doctor_id", "assistant_id", "level", "note", "filler"])
+        for row in sorted(assignments_named, key=lambda r: (r["date"], r["doctor_id"], r["level"])):
+            writer.writerow([
+                row["date"], assign.weekday_jp(row["date"]), row["doctor_id"],
+                row["assistant_id"], row["level"], row["note"], row["filler"],
+            ])
+
+    assign.write_html_report(
+        f"{out_dir}/report_{suffix}_実名版.html",
+        dates, doctor_ids_named, assignments_named, compromise_log_named,
+        weekly_count_named, staff_named, report_title=report_title,
+    )
+
+
 def write_symbol_log(path, symbol_log):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
@@ -187,8 +230,13 @@ def main():
     )
     write_symbol_log(f"{out_dir}/symbol_log_202610.csv", symbol_log)
 
-    # 実名対応表: リポジトリにはコミットしない前提の別ファイル
+    # 実名対応表・実名版CSV/HTML: リポジトリにはコミットしない前提の別ファイル
     write_name_mapping(f"{out_dir}/name_mapping_202610.csv", id_to_name)
+    write_named_versions(
+        out_dir, "202610", dates, doctor_ids, assignments, compromise_log,
+        weekly_count, staff, id_to_name,
+        report_title="2026年10月 アシスタント配置表（実名版）",
+    )
 
     print(f"対象日数: {len(dates)}")
     print(f"配置件数: {len(assignments)}")
