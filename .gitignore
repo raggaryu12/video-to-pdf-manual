@@ -8,3 +8,9 @@ venv/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# スタッフの実名を含む可能性があるファイルはコミットしない
+dental_assistant_scheduler/real_data/*_wide.csv
+dental_assistant_scheduler/real_data/roster.json
+dental_assistant_scheduler/real_data/output/name_mapping*.csv
+dental_assistant_scheduler/real_data/output/*実名版*
